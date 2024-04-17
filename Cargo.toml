@@ -1,0 +1,13 @@
+[package]
+name = "nano"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+any_key = "0.1.1"
+atomic_refcell = "0.1.13"
+dyn-clone = "1.0.17"
+num_cpus = "1.16.0"
+parking_lot = "0.12.1"
