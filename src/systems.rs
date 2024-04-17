@@ -1,11 +1,20 @@
-use std::{any::Any, collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use any_key::AnyHash;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 
 use crate::{
     events::EventQueue,
-    globals::{GlobalMut, GlobalRef, Globals, IntoGlobalKey, Singleton},
+    globals::{
+        GlobalMut, GlobalRef, Globals, GlobalsCommandQueue, IntoGlobalKey, IntoSingletonKey,
+        Singleton, SingletonKey,
+    },
     threadpool::ThreadPool,
 };
 
@@ -37,26 +46,33 @@ impl Scheduler {
             let thread_pool = ThreadPool::new(&globals_cell);
             let mut globals = globals_cell.borrow_mut();
 
-            //TODO: Remove the event queue from the globals, and use system return value to emit new ones
             let mut event_queue = EventQueue::new();
             event_queue.push(start_event);
-            globals.define(Singleton(event_queue));
+            globals.insert(Singleton(event_queue));
 
             drop(globals); // release mutable borrow
-            let globals = globals_cell.borrow();
 
             while let Some(events) = {
+                let globals = globals_cell.borrow(); // Not in scope when the loop runs
                 let mut event_queue = globals
                     .get_mut(Singleton::<EventQueue>::key())
                     .expect("Could not retrieve event queue global!");
+
                 Some(event_queue.drain())
                     .filter(|events| events.len() > 0 || !thread_pool.finished_executing())
             } {
                 events
                     .into_iter()
                     .filter_map(|event| self.systems.get(&(event as Box<dyn AnyHash>)))
-                    .flatten()
-                    .for_each(|system| thread_pool.execute(system.clone()))
+                    .for_each(|eventsyss| {
+                        while !thread_pool.finished_executing() {}
+
+                        globals_cell.borrow_mut().update_command_queue();
+
+                        for system in eventsyss {
+                            thread_pool.execute(system.clone());
+                        }
+                    });
             }
 
             thread_pool.shutdown();

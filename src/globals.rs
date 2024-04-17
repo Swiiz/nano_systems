@@ -38,6 +38,8 @@ pub type GlobalRef<'a, T> = MappedRwLockReadGuard<'a, T>;
 pub type GlobalMut<'a, T> = MappedRwLockWriteGuard<'a, T>;
 
 impl Globals {
+    pub const COMMANDS: SingletonKey<GlobalsCommandQueue> = GlobalsCommandQueue::SINGLETON;
+
     pub fn new() -> Self {
         let mut _self = Globals {
             accessors: HashMap::new(),
@@ -47,6 +49,7 @@ impl Globals {
         // extend Globals, adding singletons (1type=1key=1value)
         // needed by default
         _self.add_support_for::<SingletonGlobals>();
+        _self.update_command_queue();
         _self
     }
 
@@ -56,40 +59,45 @@ impl Globals {
         }
     }
 
-    pub fn define<C>(&mut self, new_entries: impl IntoGlobalEntries<C>) {
-        let new_entries = new_entries.into_global_entries();
+    pub(crate) fn update_command_queue(&mut self) {
+        if let Some(queue) = self.remove(Globals::COMMANDS) {
+            queue.apply(self);
+        }
+        self.insert(Singleton(GlobalsCommandQueue::new_empty()));
+    }
 
-        for entry in new_entries {
-            let need_resize = self.free_entries.is_empty();
-            let id = if need_resize {
-                self.entries.len()
-            } else {
-                self.free_entries.pop().unwrap()
-            };
+    pub fn insert(&mut self, entry: impl Into<GlobalEntry>) {
+        let entry = entry.into();
+        let need_resize = self.free_entries.is_empty();
+        let id = if need_resize {
+            self.entries.len()
+        } else {
+            self.free_entries.pop().unwrap()
+        };
 
-            for (tid, part) in &entry.key.parts {
-                if let Some(redefined_id) = self
-                    .accessors
-                    .get_mut(tid)
-                    .expect("Tried to define global with invalid key!")
-                    .insert(dyn_clone::clone_box(&**part), id)
-                {
-                    let redefined = &mut self.entries[redefined_id].as_mut().unwrap().get_mut();
-                    redefined.key.parts.remove(tid);
-                    if redefined.key.parts.is_empty() {
-                        let _ = &mut self.entries[redefined_id].take().unwrap();
-                    }
+        for (tid, part) in &entry.key.parts {
+            if let Some(redefined_id) = self
+                .accessors
+                .get_mut(tid)
+                .expect("Tried to define global with invalid key!")
+                .insert(dyn_clone::clone_box(&**part), id)
+            {
+                let redefined = &mut self.entries[redefined_id].as_mut().unwrap().get_mut();
+                redefined.key.parts.remove(tid);
+                if redefined.key.parts.is_empty() {
+                    let _ = &mut self.entries[redefined_id].take().unwrap();
                 }
             }
-            let new_entry = Some(RwLock::new(entry));
-            if need_resize {
-                self.entries.push(new_entry);
-            } else {
-                self.entries[id] = new_entry;
-            }
+        }
+        let new_entry = Some(RwLock::new(entry));
+        if need_resize {
+            self.entries.push(new_entry);
+        } else {
+            self.entries[id] = new_entry;
         }
     }
 
+    /// /!\ Can also not return because the backing globals isn't of type T::Value
     pub fn remove<T: IntoGlobalKey>(&mut self, key: T) -> Option<T::Value> {
         let id = self.id_of(key.into())?;
         let Some(entry) = self.entries[id].take() else {
@@ -99,7 +107,7 @@ impl Globals {
         for (tid, part) in entry.key.parts {
             self.accessors.get_mut(&tid).unwrap().remove(part);
         }
-        Some(*entry.value.downcast().unwrap())
+        Some(*(entry.value.downcast().ok()?))
     }
 
     pub fn id_of(&self, key: GlobalKey) -> Option<GlobalEntryId> {
@@ -134,19 +142,6 @@ impl Globals {
     pub fn get_mut<T: IntoGlobalKey>(&self, key: T) -> Option<GlobalMut<T::Value>> {
         let id = self.id_of(key.into())?;
         Some(map_write_guard(self.entries[id].as_ref()?.write()))
-    }
-}
-
-pub trait IntoGlobalEntries<C = ()> {
-    fn into_global_entries(self) -> Vec<GlobalEntry>;
-}
-impl<C: IntoGlobalEntries<C>, T: Into<Vec<C>>> IntoGlobalEntries<C> for T {
-    fn into_global_entries(self) -> Vec<GlobalEntry> {
-        self.into()
-            .into_iter()
-            .map(|s| s.into_global_entries())
-            .flatten()
-            .collect()
     }
 }
 
@@ -208,6 +203,56 @@ impl<K: Eq + Hash + AnyKey + Send + Sync> KeyAccessor for HashMap<K, GlobalEntry
     }
 }
 
+enum Command {
+    Insert(GlobalEntry),
+    Remove(GlobalKey),
+}
+
+/// When applied to globals, removal are done first beforte insertions!
+pub struct GlobalsCommandQueue {
+    commands: Vec<Command>,
+}
+
+impl GlobalsCommandQueue {
+    pub fn new_empty() -> Self {
+        Self {
+            commands: Vec::new(),
+        }
+    }
+}
+
+/// SHOULD NOT BE PUBLIC
+struct RemoveKey(GlobalKey);
+impl IntoGlobalKey for RemoveKey {
+    type Value = ();
+    fn into(self) -> GlobalKey {
+        self.0
+    }
+}
+
+impl GlobalsCommandQueue {
+    pub fn insert(&mut self, entry: impl Into<GlobalEntry>) {
+        self.commands.push(Command::Insert(entry.into()))
+    }
+
+    pub fn remove(&mut self, key: impl IntoGlobalKey) {
+        self.commands.push(Command::Remove(key.into()))
+    }
+
+    pub fn apply(self, globals: &mut Globals) {
+        for cmd in self.commands {
+            match cmd {
+                Command::Insert(e) => {
+                    globals.insert(e);
+                }
+                Command::Remove(k) => {
+                    globals.remove(RemoveKey(k));
+                }
+            }
+        }
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Singleton<T> Globals
@@ -236,12 +281,12 @@ impl<T: Sized + 'static> IntoSingletonKey for T {
     const SINGLETON: SingletonKey<Self> = Singleton::<T>::key();
 }
 
-impl<T: 'static + Send + Sync> IntoGlobalEntries for Singleton<T> {
-    fn into_global_entries(self) -> Vec<GlobalEntry> {
-        vec![GlobalEntry {
+impl<T: 'static + Send + Sync> Into<GlobalEntry> for Singleton<T> {
+    fn into(self) -> GlobalEntry {
+        GlobalEntry {
             key: <SingletonKey<T> as IntoGlobalKey>::into(Self::key()),
             value: Box::new(self.0),
-        }]
+        }
     }
 }
 impl<T> IntoGlobalKey for SingletonKey<T> {

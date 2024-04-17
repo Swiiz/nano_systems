@@ -1,6 +1,9 @@
+use std::any::Any;
+
 /// Allow to easily access globals.
-/// TODO: It also sorts globals by their id
-/// TODO: when locking them to avoid deadlocks.
+/// It also sorts globals by their id
+/// when locking them to avoid deadlocks.
+///
 /// Syntax example:
 /// ```
 /// access! { globals |
@@ -51,13 +54,6 @@ macro_rules! access {
             mutids.into_iter().map(|id| (id, inner_may_deadlock.write_entry(id).unwrap())).collect();
 
         $crate::access!(@guards refguards mutguards inner_may_deadlock | , $($tail)* , );
-
-        // let [a, b]  = ids; // a and b are ids
-        // ids.sort();
-        // let guards: HashMap<GlobalId, _> = ids.map(|id| (id, g.#read/write#_value(id))).collect();
-        // let [a, b] = (map_#read/write#_guard::<A>(guards[a]), map_#read/write#_guard::<B>(guards[b]));
-
-
     };
 }
 

@@ -22,10 +22,7 @@ fn main() {
     let mut scheduler = Scheduler::new();
     let mut globals = Globals::new();
 
-    globals.define(Singleton(User {
-        name: "Johny".to_string(),
-    }));
-    globals.define(Singleton(Language {
+    globals.insert(Singleton(Language {
         hello_msg: "Hello {} !".to_string(),
     }));
 
@@ -38,7 +35,12 @@ fn main() {
 fn on_start(g: GlobalAccess) {
     access! { g |
         &mut event_queue: EventQueue::SINGLETON,
+        &mut commands: Globals::COMMANDS,
     };
+
+    commands.insert(Singleton(User {
+        name: "Johny".to_string(),
+    }));
 
     event_queue.push(SayHelloEvent);
 }
